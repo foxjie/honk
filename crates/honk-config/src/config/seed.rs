@@ -75,13 +75,13 @@ impl<'de> Visitor<'de> for RawConfigSeed<'_> {
     }
     fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Config, A::Error> {
         let mut config = Config::default();
-        let mut seen = 0u8;
+        let mut seen = 0usize;
         while let Some(field) = map.next_key::<Field>()? {
             if matches!(field, Field::Ignore) {
                 map.next_value::<serde::de::IgnoredAny>()?;
                 continue;
             }
-            let bit = 1 << field as u8;
+            let bit = 1usize << field as u8;
             if seen & bit != 0 {
                 return Err(A::Error::custom("duplicate configuration field"));
             }
