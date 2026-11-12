@@ -17,6 +17,7 @@ use crate::observe::catalog::CatalogIdentity;
 
 mod dial;
 mod score;
+mod socks5;
 mod terminal;
 
 use score::{

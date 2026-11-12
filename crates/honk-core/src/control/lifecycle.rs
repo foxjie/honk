@@ -22,6 +22,7 @@ struct BoundListeners {
     udp4: Vec<Arc<UdpSocket>>,
     udp6: Vec<Arc<UdpSocket>>,
     dns: Option<dns_listener::BoundDnsListener>,
+    socks5: Vec<socks5_listener::BoundSocks5Listener>,
     nfqueue_enabled: bool,
 }
 
@@ -32,6 +33,7 @@ pub(super) struct RuntimeEpoch {
     tcp: JoinSet<()>,
     maintenance: OwnedTasks,
     dns: Option<dns_listener::DnsListener>,
+    socks5: Vec<socks5_listener::Socks5Listener>,
     janitor: Option<tokio::task::JoinHandle<()>>,
     removals: Option<retirement_worker::RetirementWorker>,
     removal_errors: mpsc::UnboundedReceiver<anyhow::Error>,
@@ -115,6 +117,7 @@ impl ControlPlane {
             .dns
             .bind_endpoint()
             .map_err(|error| anyhow::anyhow!("invalid dns.bind: {error}"))?;
+        let socks5_inbounds = config.inbound.socks5.clone();
         drop(config);
         #[cfg(feature = "ebpf")]
         {
@@ -126,6 +129,17 @@ impl ControlPlane {
             .map(dns_listener::BoundDnsListener::bind)
             .transpose()
             .map_err(|error| anyhow::anyhow!("bind dns.bind listener: {error}"))?;
+        let mut bound_socks5_listeners = Vec::with_capacity(socks5_inbounds.len());
+        for inbound in &socks5_inbounds {
+            let bound = socks5_listener::BoundSocks5Listener::bind(inbound).map_err(|error| {
+                anyhow::anyhow!("bind inbound.socks5 listener {}: {error}", inbound.bind)
+            })?;
+            info!(
+                "Control plane listening for SOCKS5 on {}",
+                bound.local_addr()?
+            );
+            bound_socks5_listeners.push(bound);
+        }
         let tcp4_addr = SocketAddr::new("0.0.0.0".parse()?, tproxy_port);
         let tcp6_addr = SocketAddr::new("::".parse()?, tproxy_port);
         let udp4_addr = tcp4_addr;
@@ -209,6 +223,7 @@ impl ControlPlane {
             udp4: udp4_sockets,
             udp6: udp6_sockets,
             dns: bound_dns_listener,
+            socks5: bound_socks5_listeners,
             nfqueue_enabled: udp_nfqueue_enabled,
         })
     }
@@ -334,6 +349,7 @@ impl ControlPlane {
         let (stop, _) = watch::channel(false);
         let mut epoch = RuntimeEpoch {
             dns: None,
+            socks5: Vec::new(),
             listeners,
             stop,
             ingress: JoinSet::new(),
@@ -356,6 +372,13 @@ impl ControlPlane {
                     self.drain_tracker.clone(),
                     self.native.clone(),
                     self.diagnostics.clone(),
+                )?);
+            }
+            for bound in epoch.listeners.socks5.drain(..) {
+                epoch.socks5.push(bound.spawn(
+                    self.spawn_handle(),
+                    self.concurrency_limit.clone(),
+                    self.drain_tracker.clone(),
                 )?);
             }
             #[cfg(all(feature = "native-api", feature = "ebpf", target_os = "linux"))]

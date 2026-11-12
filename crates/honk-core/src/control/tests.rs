@@ -24,6 +24,7 @@ mod dns_udp_ownership;
 mod health;
 #[cfg(all(feature = "ebpf", target_os = "linux"))]
 mod nfqueue_retirement;
+mod socks5_inbound;
 #[cfg(all(feature = "ebpf", target_os = "linux"))]
 mod tcp_binding;
 #[cfg(all(feature = "ebpf", target_os = "linux"))]

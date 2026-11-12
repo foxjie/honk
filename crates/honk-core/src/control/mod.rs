@@ -30,6 +30,7 @@ mod reload_tests;
 mod resource_budget;
 mod runtime;
 mod shutdown;
+mod socks5_listener;
 #[cfg(test)]
 mod tests;
 #[cfg(test)]
