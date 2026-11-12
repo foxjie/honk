@@ -2655,6 +2655,7 @@ async fn semantic_domain_reload_replaces_matching_predicates() {
         process_name: None,
         mac: None,
         dscp: None,
+        user: None,
     };
     let first = cp.router.read().await.route(&connection).to_owned();
     assert_eq!(first, "block");

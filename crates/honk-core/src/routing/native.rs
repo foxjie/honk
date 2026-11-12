@@ -164,6 +164,7 @@ pub(super) fn condition_display(
             CompiledPredicate::Dscp(_) => ("dscp", &[("", field!(dscp))]),
             CompiledPredicate::ProcessName(_) => ("pname", &[("", field!(process_name))]),
             CompiledPredicate::Mac(_) => ("mac", &[("", field!(mac))]),
+            CompiledPredicate::User(_) => ("user", &[("", field!(user))]),
         };
         let mut display = String::new();
         if compiled.not {

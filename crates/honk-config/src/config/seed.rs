@@ -16,6 +16,7 @@ pub(crate) const CONFIG_FIELDS: &[&str] = &[
     "subscriptions",
     "experimental",
     "assets",
+    "inbound",
 ];
 
 /// Public data-only adapter. Its serde errors are always redacted.
@@ -41,6 +42,7 @@ enum Field {
     Subscriptions,
     Experimental,
     Assets,
+    Inbound,
     #[serde(other)]
     Ignore,
 }
@@ -123,6 +125,7 @@ impl<'de> Visitor<'de> for RawConfigSeed<'_> {
                     }
                 }
                 Field::Assets => config.assets = map.next_value()?,
+                Field::Inbound => config.inbound = map.next_value()?,
                 Field::Ignore => unreachable!(),
             }
         }
@@ -144,6 +147,7 @@ impl<'de> Visitor<'de> for RawConfigSeed<'_> {
         let input: ExperimentalInput = seq.next_element()?.unwrap_or_default();
         let experimental = input.into_config(self.diagnostics, &self.source);
         let assets = seq.next_element()?.unwrap_or_default();
+        let inbound = seq.next_element()?.unwrap_or_default();
         if experimental.legacy_udp_nfqueue.is_some() {
             self.diagnostics
                 .push(crate::diagnostic::legacy_nfqueue_warning(
@@ -172,6 +176,7 @@ impl<'de> Visitor<'de> for RawConfigSeed<'_> {
             subscriptions,
             experimental,
             assets,
+            inbound,
         })
     }
 }

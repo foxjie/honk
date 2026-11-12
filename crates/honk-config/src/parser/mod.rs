@@ -7,6 +7,7 @@ mod dns;
 mod entries;
 mod experimental;
 mod groups;
+mod inbound;
 pub mod lexer;
 mod routing;
 
@@ -675,6 +676,12 @@ fn parse_documents(
         match Root::parse(name) {
             Some(Root::Global) => config.global = parse_global_section(segments, diagnostics)?,
             Some(Root::Dns) => config.dns = dns::parse_section(segments, diagnostics)?,
+            Some(Root::Inbound) => {
+                config
+                    .inbound
+                    .socks5
+                    .extend(inbound::parse_section(segments, diagnostics)?.socks5);
+            }
             Some(Root::Routing) => config.routing = routing::parse_section(segments, diagnostics)?,
             Some(Root::Node) => config.nodes = parse_node_section(segments, diagnostics)?,
             Some(Root::Group) => {}
