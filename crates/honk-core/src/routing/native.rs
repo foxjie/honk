@@ -298,6 +298,8 @@ pub(crate) fn missing_input(predicate: &CompiledPredicate) -> &'static str {
         CompiledPredicate::Dscp(_) => "dscp",
         CompiledPredicate::ProcessName(_) => "pname",
         CompiledPredicate::Mac(_) => "src_mac",
+        // Trace inputs carry no authenticated user, so user() can never be satisfied here.
+        CompiledPredicate::User(_) => "user",
     }
 }
 
