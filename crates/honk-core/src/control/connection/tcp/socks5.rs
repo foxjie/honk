@@ -168,6 +168,8 @@ impl ControlPlaneHandle {
         } else {
             IpVersion::V4
         };
+        // `selection_chains` only feeds the native-api racing hooks.
+        #[cfg_attr(not(feature = "native-api"), allow(unused_variables))]
         let (
             mut candidates,
             selection_mode,
