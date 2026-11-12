@@ -11,6 +11,7 @@ honk uses a dialect of dae configuration syntax; the [dialect reference](./refer
 | `group` | Select among nodes and nested groups. | [Group reference](./reference/groups.md) |
 | `routing` | Apply ordered traffic rules and a fallback outbound. | [Routing reference](./reference/routing.md) |
 | `dns` | Configure listeners, upstreams, request/response policy, and cache behavior. | [DNS reference](./reference/dns.md) |
+| `inbound` | Expose authenticated SOCKS5 proxy listeners whose users feed routing rules. | [Inbound proxy listeners](#inbound-proxy-listeners) |
 | `subscription` | Fetch remote node lists. | [Subscription reference](./reference/subscription.md) |
 | `assets` | Set download defaults for geodata, the external UI, and subscriptions. | [Assets reference](./reference/assets.md) |
 | `experimental` | Enable the independent native API, Clash API, or persistent cache. | [Experimental reference](./reference/experimental.md) |
@@ -293,6 +294,28 @@ Leave `bind` empty to disable only standalone listening, not transparent port-53
 `client_subnet` is off by default. Use a fixed IPv4/CIDR for deterministic ECS, or `auto` to infer the first public path hop as a `/24` without DNS or HTTP. Automatic inference is refreshed on reload and network changes; a bounded failure sends no generated ECS. Existing client ECS always wins. See the privacy warning in the reference before enabling it.
 
 See the [DNS reference](./reference/dns.md).
+
+## Inbound proxy listeners
+
+`inbound.socks5` serves authenticated proxy sockets in the host network namespace. LAN clients point their SOCKS proxy at these listeners, and each session then walks the same routing rules and outbound groups as transparently intercepted traffic.
+
+```dae
+inbound {
+    socks5 {
+        bind: '0.0.0.0:7894'
+        users {
+            alice: 'replace-me-alice'
+            bob: 'replace-me-bob'
+        }
+    }
+}
+```
+
+- Each `socks5 { ... }` block is one listener; declare several to serve several sockets. `users` is mandatory: a listener without users is rejected at validation, so an open relay cannot be configured by accident.
+- Every session authenticates with RFC 1929 username/password before a single proxied byte flows; wrong credentials get a subnegotiation failure. The RFC 1928 no-auth method is never offered. Passwords are compared verbatim — keep the config file protected and prefer a firewall in front of LAN exposure, like for `experimental.clash_api`.
+- Only `CONNECT` is served, for IPv4, IPv6, and domain targets; `BIND` and `UDP ASSOCIATE` are refused, so the listener relays TCP only. A domain target is resolved locally through honk's own DNS before routing and dialing; selected proxies still resolve the name remotely.
+- The authenticated username is the routing fact matched by `user(...)` (the mihomo `in-user` analogue): `user(alice) -> auto`. Intercepted traffic carries no user, so `user(...)` matches inbound sessions only. See [condition functions](./reference/routing.md#condition-functions).
+- Listeners join the runtime epoch: a reload rebinds them from the new configuration and established sessions drain with the normal shutdown sequence.
 
 ## Subscriptions
 

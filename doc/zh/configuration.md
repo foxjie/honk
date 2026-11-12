@@ -11,6 +11,7 @@ honk 使用 dae 配置语法的方言；与 dae 的已知差异见[方言参考]
 | `group` | 在节点与嵌套组之间选择。 | [组参考](./reference/groups.md) |
 | `routing` | 应用有序流量规则与默认出站。 | [路由参考](./reference/routing.md) |
 | `dns` | 配置监听、上游、请求/响应策略与缓存行为。 | [DNS 参考](./reference/dns.md) |
+| `inbound` | 暴露带用户名认证、用户参与路由规则的 SOCKS5 代理监听。 | [SOCKS5 入站监听](#socks5-入站监听) |
 | `subscription` | 获取远程节点列表。 | [订阅参考](./reference/subscription.md) |
 | `assets` | 为 geodata、外部 UI 和订阅设置下载默认值。 | [Assets 参考](./reference/assets.md) |
 | `experimental` | 启用独立原生 API、Clash API 或持久化缓存。 | [Experimental 参考](./reference/experimental.md) |
@@ -297,6 +298,28 @@ dns {
 `client_subnet` 默认关闭。需要确定性的 ECS 时写固定 IPv4/CIDR；写 `auto` 则无需 DNS 或 HTTP，将公网路径上的首个公网 hop 推断为 `/24`。自动推断会在 reload 与网络变化时刷新；有界探测失败时不生成 ECS。客户端自带的 ECS 始终优先。启用前须阅读参考文档中的隐私警告。
 
 详见 [DNS 参考](./reference/dns.md)。
+
+## SOCKS5 入站监听
+
+`inbound.socks5` 在主机网络命名空间内提供经过认证的代理监听。LAN 客户端把应用的 SOCKS 代理指向这些监听后，每条会话都会走与透明接管流量完全相同的路由规则和出站分组。
+
+```dae
+inbound {
+    socks5 {
+        bind: '0.0.0.0:7894'
+        users {
+            alice: 'replace-me-alice'
+            bob: 'replace-me-bob'
+        }
+    }
+}
+```
+
+- 每个 `socks5 { ... }` 块是一个监听器；声明多个即可同时服务多个套接字。`users` 为必填：没有用户的监听器在校验阶段直接拒绝，因此不可能误配出开放中继。
+- 每条会话在第一个代理字节流动前必须通过 RFC 1929 用户名/密码认证；凭据错误收到子协商失败。RFC 1928 免认证方法永不被提供。密码按原文比较——配置文件要有访问保护，LAN 暴露前面要保留主机防火墙，与 `experimental.clash_api` 同理。
+- 只服务 `CONNECT`，目标支持 IPv4、IPv6 与域名；`BIND` 与 `UDP ASSOCIATE` 会被拒绝，监听器只中继 TCP。域名目标在路由与拨号前先经 honk 自身 DNS 本地解析；选中的代理节点仍在远端解析域名。
+- 认证用户名即 `user(...)` 匹配的路由事实（对应 mihomo 的 `in-user`）：`user(alice) -> auto`。透明接管流量不携带用户，因此 `user(...)` 只命中入站会话。见[条件函数](./reference/routing.md#条件函数)。
+- 监听器随运行时 epoch 一起生命周期化：reload 按新配置重新绑定，已建立会话按正常停机次序排水收尾。
 
 ## 订阅
 
