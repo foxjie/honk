@@ -172,10 +172,10 @@ fn user_cases() -> Vec<ParsedCase> {
     vec![
         ParsedCase::new("user-absent", "user(alice)").with(false, |_| {}),
         ParsedCase::new("user-negated-absent", "!user(alice)").with(true, |_| {}),
-        ParsedCase::new("user-plus-port", "user(alice) && dport(443)")
+        ParsedCase::new("user-plus-port", "user(alice) && dport(8443)")
             .with(false, |_| {})
             .with(false, |c| c.dst_port = 8080),
-        ParsedCase::new("user-negated-plus-port", "!user(alice) && dport(443)")
+        ParsedCase::new("user-negated-plus-port", "!user(alice) && dport(8443)")
             .with(true, |_| {})
             .with(false, |c| c.dst_port = 8080),
     ]
