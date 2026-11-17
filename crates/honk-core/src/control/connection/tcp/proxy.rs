@@ -73,6 +73,15 @@ pub(super) struct ProxySession {
     pub(super) domain: Option<String>,
     score_reporter: Option<crate::group::ScoreReporter>,
     outbound_guard: crate::stats::ActiveConnectionGuard,
+    /// Observation/tracker evidence captured at dial time so the relay can
+    /// register the session with the connection tracker: the native flow id
+    /// (when observing), the matched rule (rule, payload), and the selection
+    /// chain to the winning node. The observation itself lives until the
+    /// relay ends so the flow reaches a terminal state like intercepted TCP.
+    native_flow_id: Option<String>,
+    rule: Option<(String, String)>,
+    chains: Vec<String>,
+    observation: ConnectionObservation,
 }
 
 impl ControlPlaneHandle {
@@ -161,19 +170,51 @@ impl ControlPlaneHandle {
                 observation.is_recording(),
             )
             .await;
+        // Same observation wiring as intercepted TCP: attach the userspace
+        // route/rule evidence before the mode override rewrites the decision.
+        observation.routed(&mut route);
+        let matched_rule = route.matched_rule.take();
         let mode_decision = self.apply_mode_override(&mut route).await;
         let outbound_name = mode_decision.name;
         let mode_constraint = mode_decision.constraint;
+        observation.mode_applied(&outbound_name);
 
         // Config's publication guard pins the group and runtime handles.
+        #[cfg(feature = "native-api")]
+        let mut pinned_native = None;
         let (generation_config, generation_group_manager, runtime_generation) = {
             let config = self.config.read().await;
+            #[cfg(feature = "native-api")]
+            if observation.is_recording() || mode_decision.group_id.is_some() {
+                pinned_native = self.native.as_ref().map(|native| {
+                    (
+                        self.diagnostics.read().generation,
+                        native.catalog.snapshot(),
+                    )
+                });
+            }
             (
                 Arc::clone(&config),
                 self.group_manager.read().clone(),
                 self.runtime_registry.read().clone(),
             )
         };
+        #[cfg(feature = "native-api")]
+        let mode_constraint = if mode_decision.group_id.as_ref().is_some_and(|expected| {
+            pinned_native
+                .as_ref()
+                .and_then(|(_, catalog)| catalog.groups.get(&outbound_name))
+                != Some(expected)
+        }) {
+            crate::control::reload::OutboundConstraint::Unavailable
+        } else {
+            mode_constraint
+        };
+        #[cfg(feature = "native-api")]
+        if let Some((generation, catalog)) = &pinned_native {
+            observation.pin_selection(*generation, catalog, &generation_config);
+        }
+        let selection_observer = observation.selection_observer();
         let outbound_kind =
             crate::stats::OutboundKind::routed(&generation_group_manager, &outbound_name);
         let outbound_guard = self.stats.track_connection(&outbound_name, outbound_kind);
@@ -189,12 +230,12 @@ impl ControlPlaneHandle {
             mut candidates,
             selection_mode,
             mut score_feedback,
-            selection_chains,
+            mut selection_chains,
             _final_owners,
             health_ipver,
         ) = {
             let context = tcp_score_context(target_addr, domain.as_deref(), ipver);
-            let plan = observation.observe_tcp_plan(None, || {
+            let plan = observation.observe_tcp_plan(selection_observer.as_ref(), || {
                 crate::control::reload::resolve_outbound_plan_for_target(
                     &generation_config,
                     &generation_group_manager,
@@ -228,8 +269,13 @@ impl ControlPlaneHandle {
             self.stats.record_error(&outbound_name, outbound_kind);
             drop(outbound_guard);
             let refusal = if outbound_name == "block" {
+                observation.finish(crate::observe::vocab::ConnectionState::Blocked, "policy_block");
                 ProxyRefusal::Blocked
             } else {
+                observation.finish(
+                    crate::observe::vocab::ConnectionState::Failed,
+                    "no_available_nodes",
+                );
                 ProxyRefusal::NoCandidates
             };
             return Ok(Err(refusal));
@@ -274,18 +320,35 @@ impl ControlPlaneHandle {
                 self.stats.record_error(&outbound_name, outbound_kind);
                 drop(outbound_guard);
                 let refusal = if outbound_name == "block" || only_block_nodes(&candidates) {
+                    observation
+                        .finish(crate::observe::vocab::ConnectionState::Blocked, "policy_block");
                     ProxyRefusal::Blocked
                 } else {
+                    observation.finish(
+                        crate::observe::vocab::ConnectionState::Failed,
+                        "dial_failed",
+                    );
                     ProxyRefusal::DialFailed
                 };
                 return Ok(Err(refusal));
             }
             Err(error) => {
                 drop(outbound_guard);
+                observation.finish(crate::observe::vocab::ConnectionState::Failed, "connection_failed");
                 return Err(error);
             }
         };
         drop(score_feedback);
+
+        let native_flow_id = observation.flow().map(|flow| flow.id().to_owned());
+        #[cfg(feature = "native-api")]
+        let chains = connection_chains(
+            selection_chains.remove(&winner.node.id).unwrap_or_default(),
+            &winner.node.name,
+        );
+        #[cfg(not(feature = "native-api"))]
+        let chains = Vec::new();
+        observation.tcp_connected(&chains, &winner.node);
 
         Ok(Ok(ProxySession {
             stream: winner.stream,
@@ -296,6 +359,10 @@ impl ControlPlaneHandle {
             domain,
             score_reporter: winner.reporter,
             outbound_guard,
+            native_flow_id,
+            rule: matched_rule,
+            chains,
+            observation,
         }))
     }
 
@@ -312,17 +379,53 @@ impl ControlPlaneHandle {
     ) -> anyhow::Result<()> {
         let ProxySession {
             stream,
-            node: _,
+            node,
             outbound_name,
             outbound_kind,
             target_addr,
-            domain: _,
+            domain,
             score_reporter,
             outbound_guard,
+            native_flow_id,
+            rule,
+            chains,
+            observation,
         } = session;
+        #[cfg(not(feature = "native-api"))]
+        let _ = (&node, &domain, &native_flow_id, &rule, &chains);
 
         let conn_upload = Arc::new(std::sync::atomic::AtomicU64::new(0));
         let conn_download = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        // The dashboard connection list reads the tracker, not the flow
+        // store, so an inbound session is only visible once it owns a
+        // tracker entry — same contract intercepted TCP gets from its
+        // `TcpFlowGuard`. The byte counters above are the live ones the
+        // relay increments, and the entry leaves when the relay ends.
+        #[cfg(feature = "native-api")]
+        let tracker_id = self.connection_tracker.is_enabled().then(|| {
+            let (rule, rule_payload) = rule.unwrap_or_else(|| ("Fallback".to_string(), String::new()));
+            self.connection_tracker.register(crate::connection_tracker::ConnectionEntry {
+                id: uuid::Uuid::new_v4().to_string(),
+                source: client_addr.to_string(),
+                destination: target_addr.to_string(),
+                proxy: node.name.clone(),
+                routed_outbound: self
+                    .connection_tracker
+                    .native_enabled()
+                    .then(|| outbound_name.clone()),
+                native_flow_id: native_flow_id.clone(),
+                rule,
+                rule_payload,
+                chains,
+                upload: conn_upload.clone(),
+                download: conn_download.clone(),
+                start_time: std::time::Instant::now(),
+                domain: domain.clone(),
+                network: "tcp".to_string(),
+                process: None,
+                process_path: None,
+            })
+        });
         let (outbound_upload, outbound_download) =
             self.stats.byte_counters(&outbound_name, outbound_kind);
         let first_response = score_reporter.as_ref().map(|reporter| {
@@ -376,6 +479,26 @@ impl ControlPlaneHandle {
             }
         }
         drop(outbound_guard);
+        #[cfg(feature = "native-api")]
+        if let Some(id) = tracker_id {
+            self.connection_tracker.remove(&id);
+        }
+        // Close the observation like intercepted TCP closes its terminal:
+        // an ignorable client disconnect is a clean close, anything else a
+        // relay failure. Without a terminal state the flow stays open in
+        // the store and `/connections` evidence lookups find nothing.
+        let (state, reason) = match &relay_result {
+            Ok(_) => (crate::observe::vocab::ConnectionState::Closed, "relay_closed"),
+            Err(error)
+                if error
+                    .downcast_ref::<std::io::Error>()
+                    .is_some_and(crate::relay::is_ignorable_connection_error) =>
+            {
+                (crate::observe::vocab::ConnectionState::Closed, "relay_closed")
+            }
+            _ => (crate::observe::vocab::ConnectionState::Failed, "relay_failed"),
+        };
+        observation.finish(state, reason);
         relay_result.map(|_| ())
     }
 }
